@@ -154,12 +154,7 @@ src/test/java/com/ecommerce
 ### 실행 방법
 
 ```bash
-# 로컬 환경 실행
-./gradlew bootRun
-
-# 테스트 실행
-./gradlew test
-
-# 통합 테스트만 실행
-./gradlew integrationTest
+docker-compose up -d
 ```
+
+#### [요구사항정리](../../../Downloads/server-java)
