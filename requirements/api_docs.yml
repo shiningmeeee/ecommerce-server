@@ -1,0 +1,370 @@
+openapi: 3.0.0
+info:
+  title: E-Commerce Platform API
+  description: |
+    기능적/비기능적 요구사항(동시성, 무결성, 성능, 확장성 등)을 고려하여 설계된 E-Commerce 서비스 API 명세입니다.
+    특히 **재고 감소, 잔액 차감, 선착순 쿠폰 발급** 등 동시성 이슈가 중요한 부분에 초점을 맞추었습니다.
+  version: v1
+servers:
+  - url: https://api.ecommerce.com/v1
+    description: Production Server
+
+tags:
+  - name: Product
+    description: 상품 정보 조회
+  - name: Order
+    description: 주문 및 결제 처리
+  - name: Point
+    description: 포인트 충전 및 조회
+  - name: Coupon
+    description: 선착순 쿠폰 발급 및 조회
+
+paths:
+
+  /products/{productId}:
+    get:
+      tags:
+        - Product
+      summary: 단일 상품 상세 조회
+      description: 상품 ID를 사용하여 특정 상품의 상세 정보(ID, 이름, 가격, 잔여수량)를 조회합니다.
+      operationId: getProductById
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: 조회할 상품 식별자 (ID)
+      responses:
+        '200':
+          description: 성공적으로 상품 정보를 조회함
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          description: 상품을 찾을 수 없음
+        '500':
+          description: 서버 오류
+
+  /products:
+    get:
+      tags:
+        - Product
+      summary: 상품 목록 조회
+      description: 전체 상품 정보(ID, 이름, 가격, 잔여수량)를 조회합니다.
+      operationId: getProducts
+      responses:
+        '200':
+          description: 성공적으로 상품 목록을 조회함
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+        '500':
+          description: 서버 오류
+
+  /products/top-selling:
+    get:
+      tags:
+        - Product
+      summary: 인기 판매 상품 조회 (최근 3일)
+      description: |
+        최근 3일간 가장 많이 팔린 상위 5개 상품 정보를 제공합니다.
+        **기술적 고민:** 외부 데이터 플랫폼 또는 별도의 캐싱/집계 시스템(예: Redis, Kafka Connect, Batch Job)을 통해 집계된 통계 데이터를 조회합니다.
+      operationId: getTopSellingProducts
+      responses:
+        '200':
+          description: 성공적으로 인기 판매 상품 목록을 조회함
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProductSaleInfo'
+        '500':
+          description: 통계 데이터 조회 오류
+
+  /point/{userId}:
+    get:
+      tags:
+        - Point
+      summary: 사용자 잔여 포인트 조회
+      description: 특정 사용자의 현재 잔여 포인트를 조회합니다.
+      operationId: getUserPoints
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: 사용자 식별자 (ID)
+      responses:
+        '200':
+          description: 성공적으로 잔여 포인트를 조회함
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PointBalance'
+        '404':
+          description: 사용자 없음
+        '500':
+          description: 서버 오류
+
+  /point/{userId}/charge:
+    post:
+      tags:
+        - Point
+      summary: 포인트 충전
+      description: 사용자 식별자 및 충전할 금액을 입력받아 포인트를 충전합니다.
+      operationId: chargePoints
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: 사용자 식별자 (ID)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PointChargeRequest'
+      responses:
+        '200':
+          description: 성공적으로 포인트 충전 완료
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PointBalance'
+        '400':
+          description : "유효하지 않은 요청 (예: 음수 금액 충전)"
+        '500':
+          description : 서버 오류 (**잔액 처리의 정확성 보장 필요**)
+
+  /order:
+    post:
+      tags:
+        - Order
+      summary: 주문 및 결제 처리
+      description: |
+        사용자 식별자와 상품 목록을 입력받아 주문을 처리하고 잔액 기반으로 결제합니다.
+        **핵심 고려사항:**
+        1. **동시성 제어:** 재고 감소 및 잔액 차감 시 **비관적/낙관적 락(Lock)** 또는 **분산 락(Distributed Lock)** 등을 적용하여 동시성 문제를 해결해야 합니다.
+        2. **트랜잭션:** 재고 차감, 잔액 차감, 주문 생성은 **ACID** 속성이 보장되는 단일 트랜잭션 내에서 처리되어야 합니다.
+        3. **외부 시스템 전송:** 결제 성공 시, 주문 정보를 **메시지 큐(예: Kafka, RabbitMQ)** 등을 통해 데이터 플랫폼에 비동기적으로 전송하는 것이 효율적입니다.
+      operationId: createOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderRequest'
+      responses:
+        '201':
+          description: 주문 및 결제 성공
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          description: 재고 부족, 잔액 부족, 유효하지 않은 요청
+        '500':
+          description: 서버 오류 (트랜잭션 실패, 동시성 충돌 등)
+
+  /coupon/issue/first-come-first-served:
+    post:
+      tags:
+        - Coupon
+      summary: 선착순 쿠폰 발급
+      description: |
+        선착순으로 할인 쿠폰을 발급합니다.
+        **기술적 고민:** 높은 동시성 처리를 위해 **Redis Sorted Set/List** 또는 **분산 락/큐** 등을 활용하여 요청을 제한하고 발급 순서를 관리하는 것이 중요합니다.
+      operationId: issueCouponFCS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: integer
+                  format: int64
+                  description: 쿠폰을 발급받을 사용자 ID
+      responses:
+        '200':
+          description: 성공적으로 쿠폰 발급
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  couponId:
+                    type: string
+                  message:
+                    type: string
+        '409':
+          description: 이미 발급받았거나, 쿠폰이 모두 소진됨
+        '500':
+          description: 서버 오류 (동시성 문제 발생 가능성 높음)
+
+  /coupon/{userId}:
+    get:
+      tags:
+        - Coupon
+      summary: 사용자가 보유한 쿠폰 목록 조회
+      description: 특정 사용자가 현재 보유하고 있는 유효한 쿠폰 목록을 조회합니다.
+      operationId: getUserCoupons
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: 사용자 식별자 (ID)
+      responses:
+        '200':
+          description: 성공적으로 쿠폰 목록을 조회함
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Coupon'
+        '404':
+          description: 사용자 없음
+        '500':
+          description: 서버 오류
+
+components:
+  schemas:
+    Product:
+      type: object
+      properties:
+        productId:
+          type: integer
+          format: int64
+          description: 상품 식별자
+        name:
+          type: string
+          description: 상품 이름
+        price:
+          type: integer
+          description: 상품 가격
+        stock:
+          type: integer
+          description: 잔여 수량 (**재고 조회 정확성 요구사항 고려**)
+
+    ProductSaleInfo:
+      allOf:
+        - $ref: '#/components/schemas/Product'
+        - type: object
+          properties:
+            totalSold:
+              type: integer
+              description: 최근 3일간 판매된 총 수량
+
+    PointBalance:
+      type: object
+      properties:
+        userId:
+          type: integer
+          format: int64
+        balance:
+          type: integer
+          description: 잔여 포인트
+
+    PointChargeRequest:
+      type: object
+      required:
+        - userId
+        - amount
+      properties:
+        userId:
+          type: integer
+          format: int64
+          description: 충전할 사용자 ID
+        amount:
+          type: integer
+          description: 충전할 금액
+
+    OrderRequest:
+      type: object
+      required:
+        - userId
+        - items
+      properties:
+        userId:
+          type: integer
+          format: int64
+          description: 주문/결제를 진행할 사용자 ID
+        items:
+          type: array
+          description: 주문할 상품 ID 및 수량 목록
+          items:
+            $ref: '#/components/schemas/OrderItemRequest'
+        couponId:
+          type: string
+          nullable: true
+          description: 적용할 할인 쿠폰 ID (선택 사항)
+
+    OrderItemRequest:
+      type: object
+      required:
+        - productId
+        - quantity
+      properties:
+        productId:
+          type: integer
+          format: int64
+          description: 상품 ID
+        quantity:
+          type: integer
+          description: 주문 수량
+
+    OrderResponse:
+      type: object
+      properties:
+        orderId:
+          type: string
+          description: 생성된 주문 ID
+        userId:
+          type: integer
+          format: int64
+        totalAmount:
+          type: integer
+          description: 할인 적용 전 총 주문 금액
+        discountAmount:
+          type: integer
+          description: 할인 금액
+        finalPaymentAmount:
+          type: integer
+          description: 최종 결제 금액 (포인트 차감액)
+        status:
+          type: string
+          enum: [PENDING, COMPLETED, FAILED]
+          description: 주문 상태
+
+    Coupon:
+      type: object
+      properties:
+        couponId:
+          type: string
+        name:
+          type: string
+          description: "쿠폰 이름 (예: 10% 할인 쿠폰)"
+        discountRate:
+          type: number
+          format: float
+          description: "할인율 (예: 0.1 for 10%)"
+        isUsed:
+          type: boolean
+          description: 쿠폰 사용 여부
